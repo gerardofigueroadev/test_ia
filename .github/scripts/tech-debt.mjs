@@ -84,10 +84,7 @@ async function analyzeWithClaude(diff) {
     output_config: {
       format: {
         type: 'json_schema',
-        json_schema: {
-          name: 'tech_debt_analysis',
-          schema: DEBT_SCHEMA,
-        },
+        schema: DEBT_SCHEMA,
       },
     },
   });
