@@ -164,20 +164,18 @@ async function createTrelloCard(analysis) {
   const name = getTrelloCardTitle(analysis);
   const desc = formatTrelloDescription(analysis);
 
-  // Asignar label de color según severidad más alta
-  const hasCritical = analysis.items.some((i) => i.severity === 'critical');
-  const hasHigh = analysis.items.some((i) => i.severity === 'high');
-  const color = hasCritical ? 'red' : hasHigh ? 'orange' : 'yellow';
+  const url = `https://api.trello.com/1/cards?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`;
 
-  const url = new URL('https://api.trello.com/1/cards');
-  url.searchParams.set('key', TRELLO_API_KEY);
-  url.searchParams.set('token', TRELLO_TOKEN);
-  url.searchParams.set('idList', TRELLO_LIST_ID);
-  url.searchParams.set('name', name);
-  url.searchParams.set('desc', desc);
-  url.searchParams.set('pos', 'top');
-
-  const response = await fetch(url.toString(), { method: 'POST' });
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      idList: TRELLO_LIST_ID,
+      name,
+      desc,
+      pos: 'top',
+    }),
+  });
 
   if (!response.ok) {
     const error = await response.text();
