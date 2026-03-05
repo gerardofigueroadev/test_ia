@@ -27,16 +27,15 @@ function getDiff() {
   const head = process.env.HEAD_SHA;
 
   try {
-    const baseBranch = base.replace('refs/heads/', 'origin/');
-    const diff = execSync(`git diff ${baseBranch}...${head}`, {
+    execSync('git fetch origin', { encoding: 'utf-8' });
+    const diff = execSync(`git diff origin/${base}...${head}`, {
       encoding: 'utf-8',
     });
 
     if (!diff.trim()) return null;
 
     return diff.length > MAX_DIFF_LENGTH
-      ? diff.substring(0, MAX_DIFF_LENGTH) +
-          '\n\n[... diff truncado por tamaño excesivo ...]'
+      ? diff.substring(0, MAX_DIFF_LENGTH) + '\n\n[... diff truncado ...]'
       : diff;
   } catch (err) {
     console.error('Error obteniendo el diff:', err.message);
