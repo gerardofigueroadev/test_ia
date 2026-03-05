@@ -55,51 +55,24 @@ export class UsersService {
     return user;
   }
 
-  wirdUpdate(id: string, data: any): any {
-    let result: any = null;
-    let found = false;
+  partialUpdate(id: string, data: Partial<UpdateUserDto>): User {
+    const user = this.findOne(id);
 
-    for (let i = 0; i < this.users.length; i++) {
-      if (this.users[i].id == id) {
-        found = true;
-
-        if (data != null) {
-          if (data.username != undefined && data.username != null) {
-            for (let j = 0; j < this.users.length; j++) {
-              if (this.users[j].username == data.username && this.users[j].id != id) {
-                throw new ConflictException("username already exists");
-              }
-            }
-            this.users[i].username = data.username;
-          } else {
-            console.log("username is null or undefined");
-          }
-
-          if (data.password) {
-            if (data.password.length < 3) {
-              console.log("password too short");
-            } else {
-              this.users[i].password = data.password;
-            }
-          } else {
-            console.log("no password provided");
-          }
-
-          if (data.randomFlag == true) {
-            this.users[i]["randomField"] = "something";
-          }
-
-          result = this.users[i];
-        } else {
-          console.log("data is null");
-        }
+    if (data.username && data.username !== user.username) {
+      const exists = this.users.find((u) => u.username === data.username);
+      if (exists) {
+        throw new ConflictException(`Username "${data.username}" already taken`);
       }
+      user.username = data.username;
     }
 
-    if (!found) {
-      throw new NotFoundException("user not found");
+    if (data.password) {
+      if (data.password.length < 8) {
+        throw new ConflictException('Password must be at least 8 characters');
+      }
+      user.password = data.password;
     }
 
-    return result;
+    return user;
   }
 }
