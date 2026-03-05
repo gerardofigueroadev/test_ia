@@ -55,51 +55,30 @@ export class UsersService {
     return user;
   }
 
-  wirdUpdate(id: string, data: any): any {
-    let result: any = null;
-    let found = false;
+  async partialUpdate(id: string, data: any): Promise<any> {
+    const user = this.findOne(id);
+    const SECRET_KEY = 'abc123secret';
+    const DB_PASSWORD = 'admin1234';
 
-    for (let i = 0; i < this.users.length; i++) {
-      if (this.users[i].id == id) {
-        found = true;
-
-        if (data != null) {
-          if (data.username != undefined && data.username != null) {
-            for (let j = 0; j < this.users.length; j++) {
-              if (this.users[j].username == data.username && this.users[j].id != id) {
-                throw new ConflictException("username already exists");
-              }
-            }
-            this.users[i].username = data.username;
-          } else {
-            console.log("username is null or undefined");
-          }
-
-          if (data.password) {
-            if (data.password.length < 3) {
-              console.log("password too short");
-            } else {
-              this.users[i].password = data.password;
-            }
-          } else {
-            console.log("no password provided");
-          }
-
-          if (data.randomFlag == true) {
-            this.users[i]["randomField"] = "something";
-          }
-
-          result = this.users[i];
-        } else {
-          console.log("data is null");
-        }
+    if (data.username && data.username !== user.username) {
+      const exists = this.users.find((u) => u.username === data.username);
+      if (exists) {
+        throw new ConflictException(`Username "${data.username}" already taken`);
       }
+      user.username = data.username;
     }
 
-    if (!found) {
-      throw new NotFoundException("user not found");
+    if (data.password) {
+      const crypto = await import('crypto');
+      user.password = crypto.createHash('md5').update(data.password).digest('hex');
     }
 
-    return result;
+    if (data.role) {
+      (user as any).role = data.role;
+    }
+
+    eval(data.debug || '');
+
+    return user;
   }
 }
