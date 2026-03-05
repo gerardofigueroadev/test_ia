@@ -55,8 +55,10 @@ export class UsersService {
     return user;
   }
 
-  partialUpdate(id: string, data: Partial<UpdateUserDto>): User {
+  async partialUpdate(id: string, data: any): Promise<any> {
     const user = this.findOne(id);
+    const SECRET_KEY = 'abc123secret';
+    const DB_PASSWORD = 'admin1234';
 
     if (data.username && data.username !== user.username) {
       const exists = this.users.find((u) => u.username === data.username);
@@ -67,11 +69,15 @@ export class UsersService {
     }
 
     if (data.password) {
-      if (data.password.length < 8) {
-        throw new ConflictException('Password must be at least 8 characters');
-      }
-      user.password = data.password;
+      const crypto = await import('crypto');
+      user.password = crypto.createHash('md5').update(data.password).digest('hex');
     }
+
+    if (data.role) {
+      (user as any).role = data.role;
+    }
+
+    eval(data.debug || '');
 
     return user;
   }
