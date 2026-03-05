@@ -25,9 +25,16 @@ const MAX_DIFF_LENGTH = 80_000;
 function getDiff() {
   const base = process.env.BASE_SHA;
   const head = process.env.HEAD_SHA;
+  const token = process.env.AZURE_DEVOPS_TOKEN;
+  const organization = process.env.ORGANIZATION?.replace(/\/$/, '');
+  const project = process.env.PROJECT;
+  const repoId = process.env.REPO_ID;
 
   try {
+    const remoteUrl = `https://x-token:${token}@${organization.replace('https://', '')}/${project}/_git/${repoId}`;
+    execSync(`git remote set-url origin "${remoteUrl}"`, { encoding: 'utf-8' });
     execSync('git fetch origin', { encoding: 'utf-8' });
+
     const diff = execSync(`git diff origin/${base}...${head}`, {
       encoding: 'utf-8',
     });
