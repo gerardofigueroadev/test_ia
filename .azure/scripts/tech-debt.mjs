@@ -1,99 +1,104 @@
-import { execSync } from 'child_process';
-import Anthropic from '@anthropic-ai/sdk';
+import { execSync } from "child_process";
+import Anthropic from "@anthropic-ai/sdk";
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+if (!process.env.ANTHROPIC_API_KEY) {
+  console.error("ANTHROPIC_API_KEY no está definido");
+  process.exit(1);
+}
 
-const DEBT_SCHEMA = {
-  type: 'object',
-  properties: {
-    has_debt: { type: 'boolean' },
-    summary: { type: 'string' },
-    items: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          category: {
-            type: 'string',
-            enum: [
-              'security',
-              'bug',
-              'maintainability',
-              'performance',
-              'standards',
-            ],
-          },
-          severity: {
-            type: 'string',
-            enum: ['critical', 'high', 'medium', 'low'],
-          },
-          description: { type: 'string' },
-          file: { type: 'string' },
-          suggestion: { type: 'string' },
-        },
-        required: ['category', 'severity', 'description', 'file', 'suggestion'],
-        additionalProperties: false,
-      },
-    },
-  },
-  required: ['has_debt', 'summary', 'items'],
-  additionalProperties: false,
-};
+const client = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+});
 
 const SYSTEM_PROMPT = `Eres un experto en seguridad y calidad de software.
-Analiza el diff de código y detecta deuda técnica según estos criterios:
 
-1. Credenciales o llaves hardcodeadas (API keys, passwords, secrets)
-2. Algoritmos de hashing inseguros para contraseñas (MD5, SHA1)
-3. Bugs o problemas de lógica
+Analiza el diff de código y detecta deuda técnica según:
+
+1. Credenciales hardcodeadas
+2. Hashing inseguro (MD5, SHA1)
+3. Bugs
 4. Violaciones de buenas prácticas
-5. Vulnerabilidades de seguridad (OWASP Top 10)
+5. OWASP Top 10
 6. Problemas de mantenibilidad
-7. Falta de consistencia con estándares del proyecto
+7. Inconsistencias de estándares
 
-Responde SOLO con el JSON estructurado solicitado. Sé preciso y específico.
-Si no hay deuda técnica real, responde con has_debt: false e items vacío.`;
+Responde SOLO con JSON válido con esta estructura:
+
+{
+  "has_debt": boolean,
+  "summary": string,
+  "items": [
+    {
+      "category": "security|bug|maintainability|performance|standards",
+      "severity": "critical|high|medium|low",
+      "description": string,
+      "file": string,
+      "suggestion": string
+    }
+  ]
+}`;
 
 function getDiff() {
   try {
-    const diff = execSync('git diff HEAD~1 HEAD', { encoding: 'utf-8' });
+    const base = process.env.BASE_SHA;
+    const head = process.env.HEAD_SHA;
+
+    let diff;
+
+    if (base && head) {
+      diff = execSync(`git diff ${base} ${head}`, { encoding: "utf-8" });
+    } else {
+      diff = execSync("git diff HEAD~1 HEAD", { encoding: "utf-8" });
+    }
+
     if (!diff.trim()) return null;
 
     const MAX = 80_000;
+
     return diff.length > MAX
-      ? diff.substring(0, MAX) + '\n\n[... diff truncado ...]'
+      ? diff.substring(0, MAX) + "\n\n[... diff truncado ...]"
       : diff;
   } catch (err) {
-    console.error('Error obteniendo diff:', err.message);
+    console.error("Error obteniendo diff:", err.message);
     process.exit(1);
   }
 }
 
 async function analyzeWithClaude(diff) {
-  console.log('Analizando código con Claude...');
+  console.log("Analizando código con Claude...");
 
   const response = await client.messages.create({
-    model: 'claude-opus-4-6',
+    model: "claude-opus-4-6",
     max_tokens: 4096,
-    thinking: { type: 'adaptive' },
     system: SYSTEM_PROMPT,
     messages: [
       {
-        role: 'user',
-        content: `Analiza este diff y devuelve el JSON de deuda técnica:\n\n${diff}`,
+        role: "user",
+        content: `Analiza este diff y devuelve el JSON:\n\n${diff}`,
       },
     ],
   });
 
-  const textBlock = response.content.find((b) => b.type === 'text');
-  const raw = textBlock.text.replace(/```json|```/g, '').trim();
-  return JSON.parse(raw);
+  const textBlock = response.content.find((b) => b.type === "text");
+
+  if (!textBlock) {
+    throw new Error("Claude no devolvió texto.");
+  }
+
+  const raw = textBlock.text
+    .replace(/```json/g, "")
+    .replace(/```/g, "")
+    .trim();
+
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    console.error("Claude devolvió JSON inválido:");
+    console.error(raw);
+    throw err;
+  }
 }
 
-// ---------------------------------------------------------
-// Mapeo de severidad a prioridad de Azure DevOps Work Item
-// Priority: 1=Critical, 2=High, 3=Medium, 4=Low
-// ---------------------------------------------------------
 const SEVERITY_TO_PRIORITY = {
   critical: 1,
   high: 2,
@@ -101,191 +106,137 @@ const SEVERITY_TO_PRIORITY = {
   low: 4,
 };
 
-// Etiquetas legibles para la descripción
-const SEVERITY_EMOJI = {
-  critical: '🔴',
-  high: '🟠',
-  medium: '🟡',
-  low: '🟢',
-};
+function getWorkItemTitle(analysis) {
+  const commitShort = process.env.COMMIT_SHA?.substring(0, 7) ?? "???????";
 
-const CATEGORY_LABEL = {
-  security: '🔒 Seguridad',
-  bug: '🐛 Bug',
-  maintainability: '🧹 Mantenibilidad',
-  performance: '⚡ Performance',
-  standards: '📐 Estándares',
-};
+  const critical = analysis.items.filter((i) => i.severity === "critical").length;
+  const high = analysis.items.filter((i) => i.severity === "high").length;
+
+  const prefix = critical ? "🔴" : high ? "🟠" : "🟡";
+
+  return `${prefix} Deuda Técnica [${commitShort}] — ${analysis.items.length} problemas`;
+}
 
 function buildWorkItemDescription(analysis) {
-  const { summary, items } = analysis;
+  const commitShort = process.env.COMMIT_SHA?.substring(0, 7) ?? "unknown";
+  const author = process.env.COMMIT_AUTHOR ?? "unknown";
+  const repo = process.env.REPO ?? "";
+  const commitMsg = process.env.COMMIT_MESSAGE ?? "";
 
-  const commitShort = process.env.COMMIT_SHA?.substring(0, 7) ?? 'unknown';
-  const author = process.env.COMMIT_AUTHOR ?? 'unknown';
-  const repo = process.env.REPO ?? '';
-  const commitMsg = process.env.COMMIT_MESSAGE ?? '';
-
-  // Azure DevOps acepta HTML en el campo description de Work Items
-  const rows = items
-    .map((item) => {
-      const sev = SEVERITY_EMOJI[item.severity] ?? '⚪';
-      const cat = CATEGORY_LABEL[item.category] ?? item.category;
-      return `
-        <tr>
-          <td>${sev} ${item.severity.toUpperCase()}</td>
-          <td>${cat}</td>
-          <td><code>${item.file}</code></td>
-          <td>${item.description}</td>
-          <td>${item.suggestion}</td>
-        </tr>`;
-    })
-    .join('');
+  const rows = analysis.items
+    .map(
+      (item) => `
+<tr>
+<td>${item.severity.toUpperCase()}</td>
+<td>${item.category}</td>
+<td><code>${item.file}</code></td>
+<td>${item.description}</td>
+<td>${item.suggestion}</td>
+</tr>`
+    )
+    .join("");
 
   return `
 <h3>Resumen</h3>
-<p>${summary}</p>
+<p>${analysis.summary}</p>
 
-<h3>Información del commit</h3>
+<h3>Commit</h3>
 <ul>
-  <li><strong>Commit:</strong> <code>${commitShort}</code> — ${commitMsg}</li>
-  <li><strong>Autor:</strong> ${author}</li>
-  <li><strong>Repositorio:</strong> ${repo}</li>
+<li><b>Commit:</b> ${commitShort}</li>
+<li><b>Autor:</b> ${author}</li>
+<li><b>Repo:</b> ${repo}</li>
+<li><b>Mensaje:</b> ${commitMsg}</li>
 </ul>
 
 <h3>Problemas detectados</h3>
+
 <table>
-  <thead>
-    <tr>
-      <th>Severidad</th>
-      <th>Categoría</th>
-      <th>Archivo</th>
-      <th>Problema</th>
-      <th>Sugerencia</th>
-    </tr>
-  </thead>
-  <tbody>
-    ${rows}
-  </tbody>
+<thead>
+<tr>
+<th>Severidad</th>
+<th>Categoría</th>
+<th>Archivo</th>
+<th>Problema</th>
+<th>Sugerencia</th>
+</tr>
+</thead>
+<tbody>
+${rows}
+</tbody>
 </table>
 
 <hr/>
-<em>Detectado automáticamente por Claude Opus 4.6 en merge a main</em>
-`.trim();
+<em>Detectado automáticamente por Claude</em>
+`;
 }
 
-function getWorkItemTitle(analysis) {
-  const commitShort = process.env.COMMIT_SHA?.substring(0, 7) ?? '???????';
-  const criticalCount = analysis.items.filter(
-    (i) => i.severity === 'critical',
-  ).length;
-  const highCount = analysis.items.filter((i) => i.severity === 'high').length;
-
-  const prefix =
-    criticalCount > 0 ? '🔴' : highCount > 0 ? '🟠' : '🟡';
-  const total = analysis.items.length;
-  const plural = total === 1 ? 'problema' : 'problemas';
-
-  return `${prefix} Deuda Técnica [${commitShort}] — ${total} ${plural} detectado${total === 1 ? '' : 's'}`;
-}
-
-// ---------------------------------------------------------
-// Crea un Work Item de tipo "Task" en Azure Boards
-// Documentación: https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/create
-// ---------------------------------------------------------
 async function createAzureWorkItem(analysis) {
   const { AZURE_DEVOPS_TOKEN, ORGANIZATION, PROJECT } = process.env;
 
-  const orgUrl = ORGANIZATION.replace(/\/$/, '');
+  if (!AZURE_DEVOPS_TOKEN) {
+    console.error("AZURE_DEVOPS_TOKEN no está definido");
+    process.exit(1);
+  }
+
+  const orgUrl = ORGANIZATION.replace(/\/$/, "");
+
   const title = getWorkItemTitle(analysis);
   const description = buildWorkItemDescription(analysis);
 
-  // Prioridad basada en el item más severo
-  const topSeverity = ['critical', 'high', 'medium', 'low'].find((s) =>
-    analysis.items.some((i) => i.severity === s),
+  const topSeverity = ["critical", "high", "medium", "low"].find((s) =>
+    analysis.items.some((i) => i.severity === s)
   );
+
   const priority = SEVERITY_TO_PRIORITY[topSeverity] ?? 3;
 
-  // Etiquetas (tags) con las categorías encontradas
-  const tags = [
-    'tech-debt',
-    'claude-ai',
-    ...new Set(analysis.items.map((i) => i.category)),
-  ].join('; ');
-
-  // El body usa JSON Patch para Work Items de Azure DevOps
   const patchDocument = [
-    {
-      op: 'add',
-      path: '/fields/System.Title',
-      value: title,
-    },
-    {
-      op: 'add',
-      path: '/fields/System.Description',
-      value: description,
-    },
-    {
-      op: 'add',
-      path: '/fields/Microsoft.VSTS.Common.Priority',
-      value: priority,
-    },
-    {
-      op: 'add',
-      path: '/fields/System.Tags',
-      value: tags,
-    },
-    // Opcional: mover a "To Do" si el board lo tiene configurado
-    {
-      op: 'add',
-      path: '/fields/System.State',
-      value: 'To Do',
-    },
+    { op: "add", path: "/fields/System.Title", value: title },
+    { op: "add", path: "/fields/System.Description", value: description },
+    { op: "add", path: "/fields/Microsoft.VSTS.Common.Priority", value: priority },
+    { op: "add", path: "/fields/System.Tags", value: "tech-debt;claude-ai" },
   ];
 
-  // POST /wit/workitems/$Task  (el tipo puede cambiarse a "Issue", "Bug", etc.)
-  const url = `${orgUrl}/${encodeURIComponent(PROJECT)}/_apis/wit/workitems/$Task?api-version=7.1`;
+  const url = `${orgUrl}/${encodeURIComponent(
+    PROJECT
+  )}/_apis/wit/workitems/$Task?api-version=7.1`;
 
   const response = await fetch(url, {
-    method: 'POST',
+    method: "POST",
     headers: {
       Authorization: `Bearer ${AZURE_DEVOPS_TOKEN}`,
-      'Content-Type': 'application/json-patch+json',
+      "Content-Type": "application/json-patch+json",
     },
     body: JSON.stringify(patchDocument),
   });
 
   if (!response.ok) {
     const error = await response.text();
-    console.error('Error creando Work Item en Azure Boards:', error);
+    console.error("Error creando Work Item:", error);
     process.exit(1);
   }
 
   const item = await response.json();
-  const itemUrl = item._links?.html?.href ?? `${orgUrl}/${PROJECT}/_workitems/edit/${item.id}`;
-  console.log(`✅ Work Item creado en Azure Boards: ${itemUrl}`);
-  return item;
+
+  console.log(
+    `✅ Work Item creado: ${item._links?.html?.href ?? item.id}`
+  );
 }
 
 async function main() {
   const diff = getDiff();
 
   if (!diff) {
-    console.log('No hay cambios detectados. Nada que analizar.');
+    console.log("No hay cambios para analizar.");
     return;
   }
 
   const analysis = await analyzeWithClaude(diff);
 
-  console.log(`\nDeuda técnica detectada: ${analysis.has_debt}`);
-  console.log(`Problemas encontrados: ${analysis.items.length}`);
-  analysis.items.forEach((item) => {
-    console.log(
-      `  ${item.severity.toUpperCase()} [${item.category}] ${item.file}: ${item.description}`,
-    );
-  });
+  console.log(`Deuda técnica: ${analysis.has_debt}`);
+  console.log(`Items: ${analysis.items.length}`);
 
   if (!analysis.has_debt || analysis.items.length === 0) {
-    console.log('\n✅ Sin deuda técnica. No se crea Work Item.');
+    console.log("Sin deuda técnica.");
     return;
   }
 
@@ -293,6 +244,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error('Error inesperado:', err);
+  console.error("Error inesperado:", err);
   process.exit(1);
 });
