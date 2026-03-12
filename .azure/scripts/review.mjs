@@ -1,143 +1,169 @@
-import { execSync } from 'child_process';
-import Anthropic from '@anthropic-ai/sdk';
+import { execSync } from "child_process";
+import Anthropic from "@anthropic-ai/sdk";
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const client = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+});
 
-const REVIEW_CRITERIA = `
-Por favor, analiza el siguiente código diff y evalúa:
-
-1. **Potenciales bugs o problemas de lógica**
-2. **Implementación de buenas prácticas**
-3. **Aspectos de seguridad**
-4. **Calidad y mantenibilidad del código**
-5. **Optimizaciones posibles**
-6. **Consistencia con estándares de código**
-
-Sé específico y proporciona ejemplos concretos cuando sea posible.
-Usa formato markdown para una mejor legibilidad.
-Si no hay problemas en alguna categoría, indícalo brevemente.
-
-DIFF A ANALIZAR:
-`;
+const BOT_HEADER = "## 🤖 AI Code Review — Claude";
 
 const MAX_DIFF_LENGTH = 80_000;
 
+const REVIEW_PROMPT = `
+You are a senior software engineer reviewing a pull request.
+
+Analyze the following diff and provide feedback on:
+
+- potential bugs
+- security issues
+- performance problems
+- maintainability
+
+Ignore formatting and linting issues.
+
+Write the review in Spanish.
+Use markdown with clear sections.
+`;
+
+function run(cmd) {
+  return execSync(cmd, { encoding: "utf-8" }).trim();
+}
+
 function getDiff() {
-  const base = process.env.BASE_SHA;
-  const head = process.env.HEAD_SHA;
-  const token = process.env.AZURE_DEVOPS_TOKEN;
-  const organization = process.env.ORGANIZATION?.replace(/\/$/, '');
-  const project = process.env.PROJECT;
-  const repoId = process.env.REPO_ID;
+  const { BASE_SHA, HEAD_SHA } = process.env;
 
-  try {
-    const remoteUrl = `https://x-token:${token}@${organization.replace('https://', '')}/${project}/_git/${repoId}`;
-    execSync(`git remote set-url origin "${remoteUrl}"`, { encoding: 'utf-8' });
-    execSync('git fetch origin', { encoding: 'utf-8' });
+  run("git fetch origin");
 
-    const diff = execSync(`git diff origin/${base}...${head}`, {
-      encoding: 'utf-8',
-    });
+  let diff = run(`git diff origin/${BASE_SHA}...${HEAD_SHA}`);
 
-    if (!diff.trim()) return null;
+  if (!diff.trim()) return null;
 
-    return diff.length > MAX_DIFF_LENGTH
-      ? diff.substring(0, MAX_DIFF_LENGTH) + '\n\n[... diff truncado ...]'
-      : diff;
-  } catch (err) {
-    console.error('Error obteniendo el diff:', err.message);
-    process.exit(1);
+  if (diff.length > MAX_DIFF_LENGTH) {
+    diff = diff.substring(0, MAX_DIFF_LENGTH) + "\n\n[diff truncated]";
   }
+
+  return diff;
 }
 
 async function callClaude(diff) {
-  console.log('Llamando a Claude API con streaming...\n');
+  console.log("🔍 Analyzing diff with Claude...");
 
-  const stream = client.messages.stream({
-    model: 'claude-opus-4-6',
-    max_tokens: 4096,
-    thinking: { type: 'adaptive' },
+  const response = await client.messages.create({
+    model: "claude-opus-4-6",
+    max_tokens: 3000,
     messages: [
       {
-        role: 'user',
-        content: REVIEW_CRITERIA + diff,
+        role: "user",
+        content: REVIEW_PROMPT + "\n\nDiff:\n" + diff,
       },
     ],
   });
 
-  let review = '';
+  return response?.content?.[0]?.text ?? "No review generated.";
+}
 
-  for await (const event of stream) {
-    if (
-      event.type === 'content_block_delta' &&
-      event.delta.type === 'text_delta'
-    ) {
-      review += event.delta.text;
-      process.stdout.write(event.delta.text);
-    }
-  }
+async function getPRThreads() {
+  const { AZURE_DEVOPS_TOKEN, ORGANIZATION, PROJECT, REPO_ID, PR_ID } =
+    process.env;
 
-  console.log('\n');
-  return review;
+  const url =
+    `${ORGANIZATION}/${encodeURIComponent(PROJECT)}` +
+    `/_apis/git/repositories/${REPO_ID}/pullRequests/${PR_ID}/threads?api-version=7.1`;
+
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${AZURE_DEVOPS_TOKEN}` },
+  });
+
+  if (!response.ok) return [];
+
+  const data = await response.json();
+  return data.value || [];
+}
+
+async function resolveThread(threadId) {
+  const { AZURE_DEVOPS_TOKEN, ORGANIZATION, PROJECT, REPO_ID, PR_ID } =
+    process.env;
+
+  const url =
+    `${ORGANIZATION}/${encodeURIComponent(PROJECT)}` +
+    `/_apis/git/repositories/${REPO_ID}/pullRequests/${PR_ID}/threads/${threadId}?api-version=7.1`;
+
+  await fetch(url, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${AZURE_DEVOPS_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ status: 2 }),
+  });
+}
+
+async function resolvePreviousBotThreads() {
+  const threads = await getPRThreads();
+
+  const botThreads = threads.filter(
+    (t) => t.comments?.[0]?.content?.startsWith(BOT_HEADER) && t.status !== 2,
+  );
+
+  await Promise.all(botThreads.map((t) => resolveThread(t.id)));
+
+  console.log(`🧹 Resolved ${botThreads.length} previous bot reviews`);
 }
 
 async function postPRComment(review) {
-  const { AZURE_DEVOPS_TOKEN, ORGANIZATION, PROJECT, REPO_ID, PR_ID } = process.env;
+  const { AZURE_DEVOPS_TOKEN, ORGANIZATION, PROJECT, REPO_ID, PR_ID } =
+    process.env;
 
-  const orgUrl = ORGANIZATION.replace(/\/$/, '');
+  const url =
+    `${ORGANIZATION}/${encodeURIComponent(PROJECT)}` +
+    `/_apis/git/repositories/${REPO_ID}/pullRequests/${PR_ID}/threads?api-version=7.1`;
 
-  const body = [
-    '## 🤖 AI Code Review — Claude Opus 4.6',
-    '',
-    review,
-    '',
-    '---',
-    '*Revisión automática generada por [Claude Opus 4.6](https://anthropic.com)*',
-  ].join('\n');
+  const body = `
+  ${BOT_HEADER}
 
-  const url = `${orgUrl}/${encodeURIComponent(PROJECT)}/_apis/git/repositories/${REPO_ID}/pullRequests/${PR_ID}/threads?api-version=7.1`;
+  ${review}
+
+  ---
+  *Generated by Claude AI reviewer*
+  `;
 
   const response = await fetch(url, {
-    method: 'POST',
+    method: "POST",
     headers: {
       Authorization: `Bearer ${AZURE_DEVOPS_TOKEN}`,
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      comments: [
-        {
-          parentCommentId: 0,
-          content: body,
-          commentType: 1,
-        },
-      ],
+      comments: [{ parentCommentId: 0, content: body, commentType: 1 }],
       status: 1,
     }),
   });
 
   if (!response.ok) {
     const error = await response.text();
-    console.error('Error al publicar el comentario en el PR:', error);
+    console.error("Error posting PR comment:", error);
     process.exit(1);
   }
 
-  const data = await response.json();
-  console.log(`✅ Review publicada en PR #${PR_ID} (thread ${data.id})`);
+  console.log(`✅ Review posted on PR #${PR_ID}`);
 }
 
 async function main() {
   const diff = getDiff();
 
   if (!diff) {
-    console.log('No se detectaron cambios en el diff. Nada que revisar.');
+    console.log("No changes detected.");
     return;
   }
 
+  await resolvePreviousBotThreads();
+
   const review = await callClaude(diff);
+
   await postPRComment(review);
 }
 
 main().catch((err) => {
-  console.error('Error inesperado:', err);
+  console.error("Unexpected error:", err);
   process.exit(1);
 });
